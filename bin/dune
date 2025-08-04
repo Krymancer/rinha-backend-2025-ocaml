@@ -1,0 +1,14 @@
+(executable
+ (public_name rinha-backend-2025-ocaml)
+ (name main)
+ (libraries
+  rinha-backend-2025-ocaml
+  lwt
+  lwt.unix
+  cohttp-lwt-unix
+  yojson
+  ppx_yojson_conv
+  logs
+  fmt)
+ (preprocess
+  (pps lwt_ppx ppx_yojson_conv ppx_deriving.show)))

@@ -1,0 +1,43 @@
+# Build artifacts
+_build/
+*.exe
+*.o
+*.a
+*.cma
+*.cmxa
+*.cmi
+*.cmx
+*.cmxs
+
+# Temporary files
+*.tmp
+*.temp
+*~
+.#*
+#*#
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+README*
+
+# Docker files (not needed in container)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Test files
+test/
+tests/
+
+# Opam files
+*.opam.locked

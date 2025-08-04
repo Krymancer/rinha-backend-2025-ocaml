@@ -1,0 +1,16 @@
+(library
+ (public_name rinha-backend-2025-ocaml)
+ (name rinha_backend_2025_ocaml)
+ (libraries
+  lwt
+  lwt.unix
+  cohttp-lwt-unix
+  yojson
+  ppx_yojson_conv
+  domainslib
+  logs
+  fmt)
+ (preprocess
+  (pps lwt_ppx ppx_yojson_conv ppx_deriving.show))
+ (flags
+  (:standard -w -32-33)))
