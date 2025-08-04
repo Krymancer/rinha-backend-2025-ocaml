@@ -65,4 +65,5 @@ volumes:
 
 networks:
   payment-processor:
+    external: true
     driver: bridge
