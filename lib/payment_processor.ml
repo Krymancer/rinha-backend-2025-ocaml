@@ -5,7 +5,7 @@ let payment_processor_default_url = "http://payment-processor-default:8080"
 let payment_processor_fallback_url = "http://payment-processor-fallback:8080"
 
 let get_iso_time () =
-  let now = Sys.time () in
+  let now = Unix.time () in
   let tm = Unix.gmtime now in
   Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02dZ"
     (tm.tm_year + 1900) (tm.tm_mon + 1) tm.tm_mday
@@ -23,10 +23,15 @@ let make_payment_request url amount correlation_id =
   Printf.printf "Sending JSON body to payment processor: %s\n%!" body;
   let headers = Cohttp.Header.init_with "content-type" "application/json" in
   try
-    let* (resp, _) = Cohttp_lwt_unix.Client.post ~headers ~body:(`String body) uri in
+    let* (resp, resp_body) = Cohttp_lwt_unix.Client.post ~headers ~body:(`String body) uri in
     let status_code = Cohttp.Response.status resp |> Cohttp.Code.code_of_status in
+    let* body_string = Cohttp_lwt.Body.to_string resp_body in
+    Printf.printf "Payment processor response: status=%d, body='%s'\n%!" status_code body_string;
     Lwt.return status_code
-  with _ -> Lwt.return 500
+  with 
+  | exn -> 
+    Printf.printf "❌ HTTP request failed with exception: %s\n%!" (Printexc.to_string exn);
+    Lwt.return 500
 
 let process_with_default (queue_message : Types.queue_message) : Types.payment_data_response option Lwt.t =
   let iso_time = get_iso_time () in

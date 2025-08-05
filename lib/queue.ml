@@ -15,9 +15,11 @@ let create () = {
 }
 
 let enqueue queue item =
+  Printf.printf "🔧 Enqueueing item to queue (current length: %d)\n%!" queue.length;
   let* () = Lwt_mutex.lock queue.mutex in
   queue.items <- item :: queue.items;
   queue.length <- queue.length + 1;
+  Printf.printf "✅ Item enqueued! New queue length: %d\n%!" queue.length;
   Lwt_condition.signal queue.condition ();
   Lwt_mutex.unlock queue.mutex;
   Lwt.return_unit

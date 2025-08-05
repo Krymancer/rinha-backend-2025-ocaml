@@ -22,19 +22,26 @@ let app_state = Storage.create_state ()
 let task_queue : Types.queue_message Queue.queue = Queue.create ()
 
 let process_payments_worker () =
+  Printf.printf "🔥 Payment worker started!\n%!";
   let rec loop () =
+    Printf.printf "💳 Waiting for payment in queue...\n%!";
     let* queue_message = Queue.dequeue task_queue in
+    Printf.printf "📨 Processing payment: amount=%.2f, correlation_id='%s'\n%!" queue_message.amount queue_message.correlation_id;
     let* result = Payment_processor.process_payment queue_message Config.config.is_fire_mode in
     (match result with
      | Some payment_response ->
+       Printf.printf "✅ Payment processed successfully!\n%!";
        let amount = Money.float_to_cents payment_response.amount in
        let timestamp = Int64.of_float (Sys.time () *. 1000.0) in
        (match payment_response.payment_processor with
         | Types.Default -> 
+          Printf.printf "💾 Storing in DEFAULT storage\n%!";
           Storage.BitPackingStorage.push app_state.default amount timestamp
         | Types.Fallback -> 
+          Printf.printf "💾 Storing in FALLBACK storage\n%!";
           Storage.BitPackingStorage.push app_state.fallback amount timestamp)
-     | None -> ());
+     | None -> 
+       Printf.printf "❌ Payment processing failed!\n%!");
     loop ()
   in
   loop ()
@@ -245,7 +252,7 @@ let handle_http_request fd request_str =
              let json = Yojson.Safe.from_string body_str in
              let open Yojson.Safe.Util in
              let amount = json |> member "amount" |> to_float in
-             let correlation_id = json |> member "correlationId" |> to_string in
+             let correlation_id = json |> member "correlation_id" |> to_string in
              Printf.printf "Received payment (socket): amount=%.2f, correlation_id='%s'\n%!" amount correlation_id;
              Printf.printf "Correlation ID length: %d, is empty: %b\n%!" (String.length correlation_id) (correlation_id = "");
              

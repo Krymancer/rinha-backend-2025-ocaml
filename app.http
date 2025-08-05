@@ -4,5 +4,15 @@ Content-Type: application/json
 
 {
   "amount": 19.90,
-  "correlationId": "{{$guid}}"
+  "correlation_id": "{{$guid}}"
+}
+
+### Test Payment Request
+POST http://localhost:8001/payments
+Content-Type: application/json
+
+{
+  "requested_at":"2025-08-05T22:28:30Z",
+  "amount": 19.90,
+  "correlation_id": "{{$guid}}"
 }
