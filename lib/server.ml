@@ -99,7 +99,7 @@ let payments_summary_controller (req, _body) =
     ] in
     send_response `OK ~body:json ()
   ) else (
-    let* foreign_state = Payment_summary.get_foreign_state "api-2" from_time to_time in
+    let* foreign_state = Payment_summary.get_foreign_state Config.config.foreign_state from_time to_time in
     let json = `Assoc [
       ("default", `Assoc [
         ("total_requests", `Int foreign_state.default.total_requests);
@@ -271,7 +271,7 @@ let handle_http_request fd request_str =
          ] in
          send_http_response fd 200 (Some (Yojson.Safe.to_string json))
        ) else (
-         let* foreign_state = Payment_summary.get_foreign_state "api-2" from_time to_time in
+         let* foreign_state = Payment_summary.get_foreign_state Config.config.foreign_state from_time to_time in
          let json = `Assoc [
            ("default", `Assoc [
              ("totalRequests", `Int foreign_state.default.total_requests);
@@ -313,7 +313,7 @@ let start_server socket_path =
   (* Start payment processing worker *)
   Lwt.async process_payments_worker;
   
-  (* Create Unix domain socket *)
+  (* Create Unix domain socket for nginx communication *)
   let sock = Lwt_unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
   let addr = Unix.ADDR_UNIX socket_path in
   
@@ -329,7 +329,7 @@ let start_server socket_path =
   Printf.printf "📊 Storage system: Active\n%!";
   Printf.printf "⚡ Queue worker: Running\n%!\n%!";
   
-  (* Accept connections in a loop *)
+  (* Accept connections in a loop for Unix socket *)
   let rec accept_loop () =
     let* (client_fd, _client_addr) = Lwt_unix.accept sock in
     (* Handle each client asynchronously *)

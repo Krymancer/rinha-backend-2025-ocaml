@@ -41,17 +41,50 @@ let get_foreign_state foreign_state_host from_time to_time =
       | None -> query_params in
     let query_params = ("localOnly", ["true"]) :: query_params in
     
+    (* Make HTTP call through nginx using the specific foreign API route *)
+    let path = "/" ^ foreign_state_host ^ "/payments-summary" in
     let uri = Uri.make ~scheme:"http" ~host:"nginx" ~port:9999 
-      ~path:("/" ^ foreign_state_host ^ "/payments-summary") 
+      ~path:path
       ~query:query_params () in
     
-    let* (_, body) = Cohttp_lwt_unix.Client.get uri in
-    let* _body_string = Cohttp_lwt.Body.to_string body in
-    (* Simple JSON parsing without ppx *)
-    let default_summary = { total_requests = 0; total_amount = 0.0 } in
-    let fallback_summary = { total_requests = 0; total_amount = 0.0 } in
-    Lwt.return { default = default_summary; fallback = fallback_summary }
-  with _ -> 
+    Printf.printf "Making request to: %s\n%!" (Uri.to_string uri);
+    let* (resp, body) = Cohttp_lwt_unix.Client.get uri in
+    let status_code = Cohttp.Response.status resp |> Cohttp.Code.code_of_status in
+    Printf.printf "Response status: %d\n%!" status_code;
+    let* body_string = Cohttp_lwt.Body.to_string body in
+    Printf.printf "Response body: %s\n%!" body_string;
+    
+    if status_code = 200 then (
+      try
+        let json = Yojson.Safe.from_string body_string in
+        let open Yojson.Safe.Util in
+        let default_obj = json |> member "default" in
+        let fallback_obj = json |> member "fallback" in
+        
+        let default_summary = {
+          total_requests = default_obj |> member "totalRequests" |> to_int;
+          total_amount = default_obj |> member "totalAmount" |> to_float;
+        } in
+        let fallback_summary = {
+          total_requests = fallback_obj |> member "totalRequests" |> to_int;
+          total_amount = fallback_obj |> member "totalAmount" |> to_float;
+        } in
+        Lwt.return { default = default_summary; fallback = fallback_summary }
+      with _ ->
+        Printf.printf "Failed to parse JSON response\n%!";
+        Lwt.return {
+          default = { total_requests = 0; total_amount = 0.0 };
+          fallback = { total_requests = 0; total_amount = 0.0 };
+        }
+    ) else (
+      Printf.printf "HTTP request failed with status %d\n%!" status_code;
+      Lwt.return {
+        default = { total_requests = 0; total_amount = 0.0 };
+        fallback = { total_requests = 0; total_amount = 0.0 };
+      }
+    )
+  with e -> 
+    Printf.printf "Error in get_foreign_state: %s\n%!" (Printexc.to_string e);
     Lwt.return {
       default = { total_requests = 0; total_amount = 0.0 };
       fallback = { total_requests = 0; total_amount = 0.0 };

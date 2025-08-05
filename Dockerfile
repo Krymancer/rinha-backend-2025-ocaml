@@ -2,6 +2,7 @@ FROM ocaml/opam:ubuntu-22.04-ocaml-5.3 AS builder
 
 USER root
 RUN apt-get update && apt-get install -y \
+  netbase \
   pkg-config \
   libev-dev \
   libssl-dev \
@@ -11,10 +12,11 @@ RUN apt-get update && apt-get install -y \
 USER opam
 WORKDIR /home/opam
 
+# Copy project files
 COPY --chown=opam:opam . .
 
-RUN opam update && \
-  opam install -y dune lwt lwt_ppx cohttp-lwt-unix yojson ppx_yojson_conv ppx_deriving domainslib logs fmt uri && \
+# Install dependencies and build
+RUN opam install . --deps-only --with-test --with-doc && \
   eval $(opam env) && \
   dune build
 
@@ -22,7 +24,8 @@ FROM ubuntu:22.04 AS production
 
 RUN apt-get update && apt-get install -y \
   libev4 \
-  libgmp10
+  libgmp10 \
+  netbase
 
 WORKDIR /app
 
