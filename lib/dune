@@ -9,7 +9,8 @@
   ppx_yojson_conv
   domainslib
   logs
-  fmt)
+  fmt
+  ptime)
  (preprocess
   (pps lwt_ppx ppx_yojson_conv ppx_deriving.show))
  (flags

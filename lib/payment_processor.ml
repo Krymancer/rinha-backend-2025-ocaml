@@ -12,13 +12,15 @@ let get_iso_time () =
     tm.tm_hour tm.tm_min tm.tm_sec
 
 let make_payment_request url amount correlation_id =
+  Printf.printf "Making payment request: url=%s, amount=%.2f, correlation_id='%s'\n%!" url amount correlation_id;
   let uri = Uri.of_string (url ^ "/payments") in
   let body_json = `Assoc [
     ("requested_at", `String (get_iso_time ()));
     ("amount", `Float amount);
-    ("correlation_id", `String correlation_id);
+    ("correlationId", `String correlation_id);
   ] in
   let body = Yojson.Safe.to_string body_json in
+  Printf.printf "Sending JSON body to payment processor: %s\n%!" body;
   let headers = Cohttp.Header.init_with "content-type" "application/json" in
   try
     let* (resp, _) = Cohttp_lwt_unix.Client.post ~headers ~body:(`String body) uri in

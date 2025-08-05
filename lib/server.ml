@@ -1,6 +1,23 @@
 open Lwt.Syntax
 open Cohttp_lwt_unix
 
+(* Safe timestamp parsing using Ptime for ISO 8601 dates *)
+let parse_timestamp_safe str_opt =
+  match str_opt with
+  | None -> None
+  | Some str ->
+    try
+      (* First try parsing as Unix timestamp (float) *)
+      let time_float = Float.of_string str in
+      Some (Int64.of_float (time_float *. 1000.0))
+    with _ ->
+      (* If that fails, try parsing as ISO 8601 date using Ptime *)
+      match Ptime.of_rfc3339 str with
+      | Ok (ptime, _, _) ->
+        let timestamp_float = Ptime.to_float_s ptime in
+        Some (Int64.of_float (timestamp_float *. 1000.0))
+      | Error _ -> None
+
 let app_state = Storage.create_state ()
 let task_queue : Types.queue_message Queue.queue = Queue.create ()
 
@@ -51,10 +68,13 @@ let payments_controller (req, body) =
     try
       let open Yojson.Safe.Util in
       let amount = json |> member "amount" |> to_float in
-      let correlation_id = json |> member "correlation_id" |> to_string in
-      if amount <= 0.0 || correlation_id = "" then
+      let correlation_id = json |> member "correlationId" |> to_string in
+      Printf.printf "Received payment: amount=%.2f, correlation_id='%s'\n%!" amount correlation_id;
+      Printf.printf "Correlation ID length: %d, is empty: %b\n%!" (String.length correlation_id) (correlation_id = "");
+      if amount <= 0.0 || correlation_id = "" then (
+        Printf.printf "Rejecting payment: amount <= 0 or correlation_id is empty\n%!";
         send_response `Internal_server_error ()
-      else (
+      ) else (
         let queue_message = Types.{ amount; correlation_id } in
         let* () = Queue.enqueue task_queue queue_message in
         send_response `OK ()
@@ -77,8 +97,8 @@ let payments_summary_controller (req, _body) =
   in
   
   if local_only then (
-    let from_timestamp = Option.map Int64.of_string from_time in
-    let to_timestamp = Option.map Int64.of_string to_time in
+    let from_timestamp = parse_timestamp_safe from_time in
+    let to_timestamp = parse_timestamp_safe to_time in
     let default_summary = Payment_summary.process_state 
       (Storage.BitPackingStorage.list app_state.default) from_timestamp to_timestamp in
     let fallback_summary = Payment_summary.process_state 
@@ -226,13 +246,18 @@ let handle_http_request fd request_str =
              let open Yojson.Safe.Util in
              let amount = json |> member "amount" |> to_float in
              let correlation_id = json |> member "correlationId" |> to_string in
+             Printf.printf "Received payment (socket): amount=%.2f, correlation_id='%s'\n%!" amount correlation_id;
+             Printf.printf "Correlation ID length: %d, is empty: %b\n%!" (String.length correlation_id) (correlation_id = "");
              
              if amount > 0.0 && correlation_id <> "" then (
+               Printf.printf "Processing payment with correlation_id: %s\n%!" correlation_id;
                let queue_message = Types.{ amount; correlation_id } in
                let* () = Queue.enqueue task_queue queue_message in
                send_http_response fd 200 (Some "")
-             ) else
+             ) else (
+               Printf.printf "Rejecting payment: amount <= 0 or correlation_id is empty\n%!";
                send_http_response fd 500 (Some "{\"error\":\"Invalid request data\"}")
+             )
            with 
            | Yojson.Safe.Util.Type_error (msg, _) ->
              send_http_response fd 500 (Some ("{\"error\":\"JSON error: " ^ msg ^ "\"}"))
@@ -252,8 +277,8 @@ let handle_http_request fd request_str =
        in
        
        if local_only then (
-         let from_timestamp = Option.map Int64.of_string from_time in
-         let to_timestamp = Option.map Int64.of_string to_time in
+         let from_timestamp = parse_timestamp_safe from_time in
+         let to_timestamp = parse_timestamp_safe to_time in
          let default_summary = Payment_summary.process_state 
            (Storage.BitPackingStorage.list app_state.default) from_timestamp to_timestamp in
          let fallback_summary = Payment_summary.process_state 

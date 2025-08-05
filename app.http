@@ -1,0 +1,8 @@
+### Test Payment Request
+POST http://localhost:9999/payments
+Content-Type: application/json
+
+{
+  "amount": 19.90,
+  "correlationId": "{{$guid}}"
+}

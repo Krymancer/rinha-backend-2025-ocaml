@@ -22,6 +22,7 @@ depends: [
   "domainslib"
   "logs"
   "fmt"
+  "ptime"
   "odoc" {with-doc}
 ]
 build: [

@@ -31,7 +31,8 @@
   ppx_deriving
   domainslib
   logs
-  fmt)
+  fmt
+  ptime)
  (tags
   ("payment-processing" "high-performance" "rinha-backend")))
 
