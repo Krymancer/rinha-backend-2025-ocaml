@@ -1,31 +1,4 @@
 open Lwt.Syntax
-
-type payment_processor = 
-  | Default 
-  | Fallback
-
-type payment_data = {
-  requested_at : string;
-  amount : float;
-  correlation_id : string;
-}
-
-type payment_data_response = {
-  requested_at : string;
-  amount : float;
-  correlation_id : string;
-  payment_processor : payment_processor;
-}
-
-type queue_message = {
-  amount : float;
-  correlation_id : string;
-}
-
-let payment_processor_default_url = "http://payment-processor-default:8080"
-let payment_processor_fallback_url = "http://payment-processor-fallback:8080"
-
-open Lwt.Syntax
 open Types
 
 let payment_processor_default_url = "http://payment-processor-default:8080"
@@ -93,38 +66,3 @@ let process_payment (queue_message : Types.queue_message) (is_fire_mode : bool) 
       process_with_fallback queue_message
     else
       Lwt.return_none
-
-let process_with_default payment_data =
-  let* status_code = make_payment_request payment_processor_default_url payment_data.amount payment_data.correlation_id in
-  if status_code = 200 then
-    let response = {
-      requested_at = payment_data.requested_at;
-      amount = payment_data.amount;
-      correlation_id = payment_data.correlation_id;
-      payment_processor = Default;
-    } in
-    Lwt.return_some response
-  else
-    Lwt.return_none
-
-let process_with_fallback payment_data =
-  let* status_code = make_payment_request payment_processor_fallback_url payment_data.amount payment_data.correlation_id in
-  if status_code = 200 then
-    let response = {
-      requested_at = payment_data.requested_at;
-      amount = payment_data.amount;
-      correlation_id = payment_data.correlation_id;
-      payment_processor = Fallback;
-    } in
-    Lwt.return_some response
-  else
-    Lwt.return_none
-
-let req_count = ref 0
-
-let get_iso_time () =
-  let now = Sys.time () in
-  let tm = Unix.gmtime now in
-  Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02dZ"
-    (tm.tm_year + 1900) (tm.tm_mon + 1) tm.tm_mday
-    tm.tm_hour tm.tm_min tm.tm_sec
