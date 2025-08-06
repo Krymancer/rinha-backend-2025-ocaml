@@ -46,13 +46,9 @@ let get_foreign_state foreign_state_host from_time to_time =
     let uri = Uri.make ~scheme:"http" ~host:"nginx" ~port:9999 
       ~path:path
       ~query:query_params () in
-    
-    Printf.printf "Making request to: %s\n%!" (Uri.to_string uri);
     let* (resp, body) = Cohttp_lwt_unix.Client.get uri in
     let status_code = Cohttp.Response.status resp |> Cohttp.Code.code_of_status in
-    Printf.printf "Response status: %d\n%!" status_code;
     let* body_string = Cohttp_lwt.Body.to_string body in
-    Printf.printf "Response body: %s\n%!" body_string;
     
     if status_code = 200 then (
       try
@@ -71,13 +67,11 @@ let get_foreign_state foreign_state_host from_time to_time =
         } in
         Lwt.return { default = default_summary; fallback = fallback_summary }
       with _ ->
-        Printf.printf "Failed to parse JSON response\n%!";
         Lwt.return {
           default = { total_requests = 0; total_amount = 0.0 };
           fallback = { total_requests = 0; total_amount = 0.0 };
         }
     ) else (
-      Printf.printf "HTTP request failed with status %d\n%!" status_code;
       Lwt.return {
         default = { total_requests = 0; total_amount = 0.0 };
         fallback = { total_requests = 0; total_amount = 0.0 };

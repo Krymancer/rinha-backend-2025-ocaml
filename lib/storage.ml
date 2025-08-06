@@ -15,14 +15,14 @@ module BitPackingStorage = struct
 
   let create () =
     {
-      start_timestamp = Int64.of_float (Sys.time () *. 1000.0);
+      start_timestamp = Int64.of_float (Unix.time () *. 1000.0);
       data = Array.make 1000 0;
       length = 0;
       capacity = 1000;
     }
 
   let reset storage =
-    storage.start_timestamp <- Int64.of_float (Sys.time () *. 1000.0);
+    storage.start_timestamp <- Int64.of_float (Unix.time () *. 1000.0);
     storage.length <- 0
 
   let resize storage =
@@ -39,22 +39,30 @@ module BitPackingStorage = struct
     if delta_int < 0 || delta_int > 86_400_000 then
       failwith "Timestamp fora da janela permitida (0-86400000 ms)";
     
-    if amount < 0 || amount > 4_095 then
-      failwith "Amount fora do intervalo suportado (0-4095)";
+    if amount < 0 then
+      failwith "Amount deve ser positivo";
     
     if storage.length >= storage.capacity then
       resize storage;
     
-    let packed = (delta_int lsl 12) lor amount in
-    storage.data.(storage.length) <- packed;
+    (* Use simple storage - no bit packing to avoid amount truncation *)
+    (* Store as: data[i*2] = delta, data[i*2+1] = amount *)
+    let idx = storage.length * 2 in
+    if idx + 1 >= storage.capacity then (
+      resize storage;
+      resize storage  (* Make sure we have enough space for 2 elements *)
+    );
+    
+    storage.data.(idx) <- delta_int;
+    storage.data.(idx + 1) <- amount;
     storage.length <- storage.length + 1
 
   let list storage =
     let result = ref [] in
     for i = storage.length - 1 downto 0 do
-      let entry = storage.data.(i) in
-      let delta = entry lsr 12 in
-      let amount = entry land 0xfff in
+      let idx = i * 2 in
+      let delta = storage.data.(idx) in
+      let amount = storage.data.(idx + 1) in
       let requested_at = Int64.add storage.start_timestamp (Int64.of_int delta) in
       result := { amount; requested_at } :: !result
     done;

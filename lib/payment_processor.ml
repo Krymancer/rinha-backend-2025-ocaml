@@ -12,25 +12,21 @@ let get_iso_time () =
     tm.tm_hour tm.tm_min tm.tm_sec
 
 let make_payment_request url amount correlation_id =
-  Printf.printf "Making payment request: url=%s, amount=%.2f, correlation_id='%s'\n%!" url amount correlation_id;
   let uri = Uri.of_string (url ^ "/payments") in
   let body_json = `Assoc [
-    ("requested_at", `String (get_iso_time ()));
+    ("requestedAt", `String (get_iso_time ()));
     ("amount", `Float amount);
     ("correlationId", `String correlation_id);
   ] in
   let body = Yojson.Safe.to_string body_json in
-  Printf.printf "Sending JSON body to payment processor: %s\n%!" body;
   let headers = Cohttp.Header.init_with "content-type" "application/json" in
   try
     let* (resp, resp_body) = Cohttp_lwt_unix.Client.post ~headers ~body:(`String body) uri in
     let status_code = Cohttp.Response.status resp |> Cohttp.Code.code_of_status in
-    let* body_string = Cohttp_lwt.Body.to_string resp_body in
-    Printf.printf "Payment processor response: status=%d, body='%s'\n%!" status_code body_string;
+    let* _body_string = Cohttp_lwt.Body.to_string resp_body in
     Lwt.return status_code
   with 
-  | exn -> 
-    Printf.printf "❌ HTTP request failed with exception: %s\n%!" (Printexc.to_string exn);
+  | _exn -> 
     Lwt.return 500
 
 let process_with_default (queue_message : Types.queue_message) : Types.payment_data_response option Lwt.t =
@@ -69,7 +65,9 @@ let process_payment (queue_message : Types.queue_message) (is_fire_mode : bool) 
   | Some result -> Lwt.return_some result
   | None ->
     incr req_count;
-    if !req_count mod 10 = 0 && not is_fire_mode then
+    (* In fire mode, always try fallback if default fails *)
+    (* In normal mode, only try fallback every 10th failure *)
+    if is_fire_mode || (!req_count mod 10 = 0) then
       process_with_fallback queue_message
     else
       Lwt.return_none

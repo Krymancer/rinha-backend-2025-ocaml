@@ -22,26 +22,19 @@ let app_state = Storage.create_state ()
 let task_queue : Types.queue_message Queue.queue = Queue.create ()
 
 let process_payments_worker () =
-  Printf.printf "🔥 Payment worker started!\n%!";
   let rec loop () =
-    Printf.printf "💳 Waiting for payment in queue...\n%!";
     let* queue_message = Queue.dequeue task_queue in
-    Printf.printf "📨 Processing payment: amount=%.2f, correlation_id='%s'\n%!" queue_message.amount queue_message.correlation_id;
     let* result = Payment_processor.process_payment queue_message Config.config.is_fire_mode in
     (match result with
      | Some payment_response ->
-       Printf.printf "✅ Payment processed successfully!\n%!";
        let amount = Money.float_to_cents payment_response.amount in
-       let timestamp = Int64.of_float (Sys.time () *. 1000.0) in
+       let timestamp = Int64.of_float (Unix.time () *. 1000.0) in
        (match payment_response.payment_processor with
         | Types.Default -> 
-          Printf.printf "💾 Storing in DEFAULT storage\n%!";
           Storage.BitPackingStorage.push app_state.default amount timestamp
         | Types.Fallback -> 
-          Printf.printf "💾 Storing in FALLBACK storage\n%!";
           Storage.BitPackingStorage.push app_state.fallback amount timestamp)
-     | None -> 
-       Printf.printf "❌ Payment processing failed!\n%!");
+     | None -> ());
     loop ()
   in
   loop ()
@@ -76,10 +69,7 @@ let payments_controller (req, body) =
       let open Yojson.Safe.Util in
       let amount = json |> member "amount" |> to_float in
       let correlation_id = json |> member "correlationId" |> to_string in
-      Printf.printf "Received payment: amount=%.2f, correlation_id='%s'\n%!" amount correlation_id;
-      Printf.printf "Correlation ID length: %d, is empty: %b\n%!" (String.length correlation_id) (correlation_id = "");
       if amount <= 0.0 || correlation_id = "" then (
-        Printf.printf "Rejecting payment: amount <= 0 or correlation_id is empty\n%!";
         send_response `Internal_server_error ()
       ) else (
         let queue_message = Types.{ amount; correlation_id } in
@@ -126,15 +116,35 @@ let payments_summary_controller (req, _body) =
     ] in
     send_response `OK ~body:json ()
   ) else (
+    (* Get local state *)
+    let from_timestamp = parse_timestamp_safe from_time in
+    let to_timestamp = parse_timestamp_safe to_time in
+    let local_default_summary = Payment_summary.process_state 
+      (Storage.BitPackingStorage.list app_state.default) from_timestamp to_timestamp in
+    let local_fallback_summary = Payment_summary.process_state 
+      (Storage.BitPackingStorage.list app_state.fallback) from_timestamp to_timestamp in
+    
+    (* Get foreign state *)
     let* foreign_state = Payment_summary.get_foreign_state Config.config.foreign_state from_time to_time in
+    
+    (* Combine local + foreign states *)
+    let combined_default = {
+      Payment_summary.total_requests = local_default_summary.total_requests + foreign_state.default.total_requests;
+      total_amount = local_default_summary.total_amount +. foreign_state.default.total_amount;
+    } in
+    let combined_fallback = {
+      Payment_summary.total_requests = local_fallback_summary.total_requests + foreign_state.fallback.total_requests;
+      total_amount = local_fallback_summary.total_amount +. foreign_state.fallback.total_amount;
+    } in
+    
     let json = `Assoc [
       ("default", `Assoc [
-        ("total_requests", `Int foreign_state.default.total_requests);
-        ("total_amount", `Float foreign_state.default.total_amount);
+        ("total_requests", `Int combined_default.total_requests);
+        ("total_amount", `Float combined_default.total_amount);
       ]);
       ("fallback", `Assoc [
-        ("total_requests", `Int foreign_state.fallback.total_requests);
-        ("total_amount", `Float foreign_state.fallback.total_amount);
+        ("total_requests", `Int combined_fallback.total_requests);
+        ("total_amount", `Float combined_fallback.total_amount);
       ]);
     ] in
     send_response `OK ~body:json ()
@@ -253,16 +263,12 @@ let handle_http_request fd request_str =
              let open Yojson.Safe.Util in
              let amount = json |> member "amount" |> to_float in
              let correlation_id = json |> member "correlation_id" |> to_string in
-             Printf.printf "Received payment (socket): amount=%.2f, correlation_id='%s'\n%!" amount correlation_id;
-             Printf.printf "Correlation ID length: %d, is empty: %b\n%!" (String.length correlation_id) (correlation_id = "");
              
              if amount > 0.0 && correlation_id <> "" then (
-               Printf.printf "Processing payment with correlation_id: %s\n%!" correlation_id;
                let queue_message = Types.{ amount; correlation_id } in
                let* () = Queue.enqueue task_queue queue_message in
                send_http_response fd 200 (Some "")
              ) else (
-               Printf.printf "Rejecting payment: amount <= 0 or correlation_id is empty\n%!";
                send_http_response fd 500 (Some "{\"error\":\"Invalid request data\"}")
              )
            with 
@@ -303,27 +309,45 @@ let handle_http_request fd request_str =
          ] in
          send_http_response fd 200 (Some (Yojson.Safe.to_string json))
        ) else (
+         (* Get local state *)
+         let from_timestamp = parse_timestamp_safe from_time in
+         let to_timestamp = parse_timestamp_safe to_time in
+         let local_default_summary = Payment_summary.process_state 
+           (Storage.BitPackingStorage.list app_state.default) from_timestamp to_timestamp in
+         let local_fallback_summary = Payment_summary.process_state 
+           (Storage.BitPackingStorage.list app_state.fallback) from_timestamp to_timestamp in
+         
+         (* Get foreign state *)
          let* foreign_state = Payment_summary.get_foreign_state Config.config.foreign_state from_time to_time in
+         
+         (* Combine local + foreign states *)
+         let combined_default = {
+           Payment_summary.total_requests = local_default_summary.total_requests + foreign_state.default.total_requests;
+           total_amount = local_default_summary.total_amount +. foreign_state.default.total_amount;
+         } in
+         let combined_fallback = {
+           Payment_summary.total_requests = local_fallback_summary.total_requests + foreign_state.fallback.total_requests;
+           total_amount = local_fallback_summary.total_amount +. foreign_state.fallback.total_amount;
+         } in
+         
          let json = `Assoc [
            ("default", `Assoc [
-             ("totalRequests", `Int foreign_state.default.total_requests);
-             ("totalAmount", `Float foreign_state.default.total_amount);
+             ("totalRequests", `Int combined_default.total_requests);
+             ("totalAmount", `Float combined_default.total_amount);
            ]);
            ("fallback", `Assoc [
-             ("totalRequests", `Int foreign_state.fallback.total_requests);
-             ("totalAmount", `Float foreign_state.fallback.total_amount);
+             ("totalRequests", `Int combined_fallback.total_requests);
+             ("totalAmount", `Float combined_fallback.total_amount);
            ]);
          ] in
          send_http_response fd 200 (Some (Yojson.Safe.to_string json))
        )
-       
-     (* POST /purge-payments *)  
+
      | (`POST, "/purge-payments") ->
        Storage.BitPackingStorage.reset app_state.default;
        Storage.BitPackingStorage.reset app_state.fallback;
        send_http_response fd 200 (Some "")
-       
-     (* 404 Not Found *)
+
      | _ ->
        send_http_response fd 404 (Some "{\"error\":\"Not Found\"}"))
 
@@ -331,19 +355,19 @@ let handle_client fd =
   let* request_str = read_http_request fd in
   let* () = 
     try handle_http_request fd request_str 
-    with e -> 
-      Printf.printf "Error handling request: %s\n%!" (Printexc.to_string e);
+    with _ ->
       send_http_response fd 500 (Some "{\"error\":\"Internal server error\"}")
   in
   let* () = Lwt_unix.close fd in
   Lwt.return_unit
 
 let start_server socket_path =
-  (* Remove existing socket file if it exists *)
   (try Sys.remove socket_path with Sys_error _ -> ());
-  
-  (* Start payment processing worker *)
-  Lwt.async process_payments_worker;
+
+  let num_workers = 2 in
+  for _ = 1 to num_workers do
+    Lwt.async (fun () -> process_payments_worker ());
+  done;
   
   (* Create Unix domain socket for nginx communication *)
   let sock = Lwt_unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
@@ -351,17 +375,8 @@ let start_server socket_path =
   
   let* () = Lwt_unix.bind sock addr in
   Lwt_unix.listen sock 10;
-  
-  (* Set socket permissions *)
   Unix.chmod socket_path 0o666;
   
-  Printf.printf "🚀 OCaml Payment Processing Server Started!\n%!";
-  Printf.printf "📡 Listening on Unix socket: %s\n%!" socket_path;
-  Printf.printf "💳 Payment processor: Ready\n%!";
-  Printf.printf "📊 Storage system: Active\n%!";
-  Printf.printf "⚡ Queue worker: Running\n%!\n%!";
-  
-  (* Accept connections in a loop for Unix socket *)
   let rec accept_loop () =
     let* (client_fd, _client_addr) = Lwt_unix.accept sock in
     (* Handle each client asynchronously *)
