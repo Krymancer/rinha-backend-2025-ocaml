@@ -25,3 +25,6 @@ GET http://localhost:9999/api1/payments-summary?localOnly=true
 
 ### Test Summary
 GET http://localhost:9999/api2/payments-summary?localOnly=true
+
+### Purge
+POST http://localhost:9999/purge-payments
