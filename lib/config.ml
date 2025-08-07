@@ -1,7 +1,6 @@
 type config = {
   socket_path : string;
   foreign_state : string;
-  is_fire_mode : bool;
   workers : int;
 }
 
@@ -14,14 +13,10 @@ let load_config () =
     try Sys.getenv "FOREIGN_STATE" 
     with Not_found -> "" 
   in
-  let is_fire_mode = 
-    try Sys.getenv "MODE" = "🔥"
-    with Not_found -> false
-  in
   let workers = 
     try int_of_string (Sys.getenv "WORKERS")
     with _ -> 1
   in
-  { socket_path; foreign_state; is_fire_mode; workers }
+  { socket_path; foreign_state; workers }
 
 let config = load_config ()

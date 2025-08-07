@@ -12,12 +12,18 @@ RUN apt-get update && apt-get install -y \
 USER opam
 WORKDIR /home/opam
 
-# Copy project files
+# Copy only dependency files first for better caching
+COPY --chown=opam:opam dune-project .
+COPY --chown=opam:opam rinha-backend-2025-ocaml.opam .
+
+# Install dependencies (this layer will be cached unless deps change)
+RUN opam install . --deps-only --with-test --with-doc
+
+# Now copy source code (this invalidates cache only when source changes)
 COPY --chown=opam:opam . .
 
-# Install dependencies and build
-RUN opam install . --deps-only --with-test --with-doc && \
-  eval $(opam env) && \
+# Build the project
+RUN eval $(opam env) && \
   dune build
 
 FROM ubuntu:22.04 AS production

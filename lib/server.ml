@@ -24,11 +24,15 @@ let task_queue : Types.queue_message Queue.queue = Queue.create ()
 let process_payments_worker () =
   let rec loop () =
     let* queue_message = Queue.dequeue task_queue in
-    let* result = Payment_processor.process_payment queue_message Config.config.is_fire_mode in
+    let* result = Payment_processor.process_payment queue_message in
     (match result with
      | Some payment_response ->
        let amount = Money.float_to_cents payment_response.amount in
-       let timestamp = Int64.of_float (Unix.time () *. 1000.0) in
+       (* Use the timestamp from payment processor response for consistency *)
+       let timestamp = match Ptime.of_rfc3339 payment_response.requested_at with
+         | Ok (ptime, _, _) -> Int64.of_float (Ptime.to_float_s ptime *. 1000.0)
+         | Error _ -> Int64.of_float (Unix.time () *. 1000.0) (* fallback *)
+       in
        (match payment_response.payment_processor with
         | Types.Default -> 
           Storage.BitPackingStorage.push app_state.default amount timestamp
@@ -60,6 +64,82 @@ let read_body (_req, body) =
   with _ ->
     Lwt.return_none
 
+(* Fast manual JSON parsing for better performance *)
+let fast_parse_payment body_str =
+  let len = String.length body_str in
+  if len < 30 then None else (* Minimum size check *)
+  
+  let is_whitespace = function ' ' | '\t' | '\n' | '\r' -> true | _ -> false in
+  
+  (* Find "amount" field *)
+  let rec find_amount i =
+    if i >= len - 8 then None else
+    if String.sub body_str i 8 = "\"amount\"" then
+      let rec find_colon j =
+        if j >= len then None else
+        if body_str.[j] = ':' then
+          let rec skip_whitespace k =
+            if k >= len then None else
+            if is_whitespace body_str.[k] then skip_whitespace (k + 1)
+            else Some k
+          in
+          skip_whitespace (j + 1)
+        else find_colon (j + 1)
+      in
+      find_colon (i + 8)
+    else find_amount (i + 1)
+  in
+  
+  (* Find "correlation_id" field *)
+  let rec find_correlation_id i =
+    if i >= len - 16 then None else
+    if String.sub body_str i 16 = "\"correlation_id\"" then
+      let rec find_colon j =
+        if j >= len then None else
+        if body_str.[j] = ':' then
+          let rec skip_whitespace k =
+            if k >= len then None else
+            if is_whitespace body_str.[k] then skip_whitespace (k + 1)
+            else if body_str.[k] = '"' then Some (k + 1)
+            else None
+          in
+          skip_whitespace (j + 1)
+        else find_colon (j + 1)
+      in
+      find_colon (i + 16)
+    else find_correlation_id (i + 1)
+  in
+  
+  let amount_opt = 
+    match find_amount 0 with
+    | None -> None
+    | Some pos ->
+      let rec find_end j acc =
+        if j >= len then Float.of_string acc
+        else match body_str.[j] with
+        | '0'..'9' | '.' | '-' | '+' | 'e' | 'E' -> find_end (j + 1) (acc ^ String.make 1 body_str.[j])
+        | _ -> Float.of_string acc
+      in
+      try Some (find_end pos "") with _ -> None
+  in
+  
+  let correlation_id_opt =
+    match find_correlation_id 0 with
+    | None -> None
+    | Some pos ->
+      let rec find_end j acc =
+        if j >= len then Some acc
+        else if body_str.[j] = '"' then Some acc
+        else find_end (j + 1) (acc ^ String.make 1 body_str.[j])
+      in
+      find_end pos ""
+  in
+  
+  match amount_opt, correlation_id_opt with
+  | Some amount, Some correlation_id when amount > 0.0 && correlation_id <> "" ->
+    Some Types.{ amount; correlation_id }
+  | _ -> None
+
 let payments_controller (req, body) =
   let* body_opt = read_body (req, body) in
   match body_opt with
@@ -68,7 +148,7 @@ let payments_controller (req, body) =
     try
       let open Yojson.Safe.Util in
       let amount = json |> member "amount" |> to_float in
-      let correlation_id = json |> member "correlationId" |> to_string in
+      let correlation_id = json |> member "correlation_id" |> to_string in
       if amount <= 0.0 || correlation_id = "" then (
         send_response `Internal_server_error ()
       ) else (
@@ -258,24 +338,13 @@ let handle_http_request fd request_str =
      | (`POST, "/payments") ->
        (match body_opt with
         | Some body_str ->
-          (try
-             let json = Yojson.Safe.from_string body_str in
-             let open Yojson.Safe.Util in
-             let amount = json |> member "amount" |> to_float in
-             let correlation_id = json |> member "correlation_id" |> to_string in
-             
-             if amount > 0.0 && correlation_id <> "" then (
-               let queue_message = Types.{ amount; correlation_id } in
-               let* () = Queue.enqueue task_queue queue_message in
-               send_http_response fd 200 (Some "")
-             ) else (
-               send_http_response fd 500 (Some "{\"error\":\"Invalid request data\"}")
-             )
-           with 
-           | Yojson.Safe.Util.Type_error (msg, _) ->
-             send_http_response fd 500 (Some ("{\"error\":\"JSON error: " ^ msg ^ "\"}"))
-           | _ ->
-             send_http_response fd 500 (Some "{\"error\":\"JSON parsing error\"}"))
+          (match fast_parse_payment body_str with
+           | Some queue_message ->
+             let* () = Queue.enqueue task_queue queue_message in
+             send_http_response fd 200 (Some "")
+           | None ->
+             send_http_response fd 500 (Some "{\"error\":\"Invalid request data\"}")
+          )
         | None ->
           send_http_response fd 500 (Some "{\"error\":\"No body provided\"}"))
           
