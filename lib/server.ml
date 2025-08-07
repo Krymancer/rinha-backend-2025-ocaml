@@ -364,7 +364,7 @@ let handle_client fd =
 let start_server socket_path =
   (try Sys.remove socket_path with Sys_error _ -> ());
 
-  let num_workers = 2 in
+  let num_workers = Config.config.workers in (* Use environment variable *)
   for _ = 1 to num_workers do
     Lwt.async (fun () -> process_payments_worker ());
   done;
@@ -374,7 +374,7 @@ let start_server socket_path =
   let addr = Unix.ADDR_UNIX socket_path in
   
   let* () = Lwt_unix.bind sock addr in
-  Lwt_unix.listen sock 10;
+  Lwt_unix.listen sock 64; (* Increased back to 64 *)
   Unix.chmod socket_path 0o666;
   
   let rec accept_loop () =
