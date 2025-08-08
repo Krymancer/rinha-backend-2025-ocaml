@@ -127,30 +127,34 @@ let process_payment (queue_message : Types.queue_message) : Types.payment_data_r
         (Fallback, payment_processor_fallback_url) ]
   in
 
-  let timeout_s = 3.0 in
+  let timeout_s = 1.5 in
   match ordered with
   | [] -> Lwt.return_none
   | [ (proc, url) ] ->
       try_processor proc url queue_message ~timeout_s
   | (p1_proc, p1_url) :: (p2_proc, p2_url) :: _ ->
-      (* Hedged: start primary, start secondary after a small delay if primary hasn't finished. *)
-      let hedge_delay = 0.2 (* seconds *) in
-      let p1 = try_processor p1_proc p1_url queue_message ~timeout_s in
-      let s2 = Lwt_unix.sleep hedge_delay in
-      let p2 =
-        let* () = s2 in
-        try_processor p2_proc p2_url queue_message ~timeout_s
-      in
-      (* Resolve with the first Some; if both None, return None after both complete. *)
-      let (resolver, wakener) = Lwt.wait () in
+      let hedge_delay = 0.2 in
       let resolved = ref false in
+      let result_t, result_w = Lwt.wait () in
+
+      let p1 = try_processor p1_proc p1_url queue_message ~timeout_s in
       Lwt.on_success p1 (function
         | Some _ as r when not !resolved ->
-            resolved := true; Lwt.wakeup_later wakener r
+            resolved := true; Lwt.wakeup_later result_w r
         | _ -> ());
+
+      let p2 =
+        let* () = Lwt_unix.sleep hedge_delay in
+        if !resolved then Lwt.return_none
+        else try_processor p2_proc p2_url queue_message ~timeout_s
+      in
       Lwt.on_success p2 (function
         | Some _ as r when not !resolved ->
-            resolved := true; Lwt.wakeup_later wakener r
+            resolved := true; Lwt.wakeup_later result_w r
         | _ -> ());
-      let* _ = Lwt.join [ (let* _ = p1 in Lwt.return_unit); (let* _ = p2 in Lwt.return_unit) ] in
-      if !resolved then resolver else Lwt.return_none
+
+      let none_when_both_finish =
+        let* _ = Lwt.both p1 p2 in
+        Lwt.return_none
+      in
+      Lwt.pick [ result_t; none_when_both_finish ]
