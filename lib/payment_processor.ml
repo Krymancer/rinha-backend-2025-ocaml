@@ -69,18 +69,25 @@ let make_payment_request url amount correlation_id ~timeout_s =
   let headers = Cohttp.Header.init_with "content-type" "application/json" in
   
   let request_promise = 
-    try
-      let* (resp, resp_body) = Cohttp_lwt_unix.Client.post ~headers ~body:(`String body) uri in
-      let status_code = Cohttp.Response.status resp |> Cohttp.Code.code_of_status in
-      let* _response_body = Cohttp_lwt.Body.to_string resp_body in
-      if status_code = 200 then Lwt.return (true, iso_time) else Lwt.return (false, iso_time)
-    with _ -> Lwt.return (false, iso_time)
+    Lwt.catch
+      (fun () ->
+        let* (resp, resp_body) = Cohttp_lwt_unix.Client.post ~headers ~body:(`String body) uri in
+        let status_code = Cohttp.Response.status resp |> Cohttp.Code.code_of_status in
+        let* _response_body = Cohttp_lwt.Body.to_string resp_body in
+        if status_code = 200 then Lwt.return (true, iso_time) else Lwt.return (false, iso_time))
+      (function
+        | Lwt.Canceled -> Lwt.return (false, iso_time)
+        | _ -> Lwt.return (false, iso_time))
   in
   let timeout_promise =
     let* () = Lwt_unix.sleep timeout_s in
     Lwt.return (false, iso_time)
   in
-  Lwt.pick [request_promise; timeout_promise]
+  Lwt.catch
+    (fun () -> Lwt.pick [request_promise; timeout_promise])
+    (function
+      | Lwt.Canceled -> Lwt.return (false, iso_time)
+      | _ -> Lwt.return (false, iso_time))
 
 let mk_response (processor:Types.payment_processor) (iso_time:string) (queue_message:Types.queue_message) : Types.payment_data_response =
   {
@@ -102,8 +109,8 @@ let process_payment (queue_message : Types.queue_message) : Types.payment_data_r
   let d = !default_health in
   let f = !fallback_health in
 
-  (* Build candidates ordered by health and minResponseTime; default wins ties *)
-  let candidates =
+  (* Preferred order; default wins ties *)
+  let ordered =
     if d.healthy && f.healthy then
       if d.min_response_time <= f.min_response_time then
         [ (Default, payment_processor_default_url);
@@ -121,10 +128,29 @@ let process_payment (queue_message : Types.queue_message) : Types.payment_data_r
   in
 
   let timeout_s = 3.0 in
-  let rec try_list = function
-    | [] -> Lwt.return_none
-    | (proc, url) :: tl ->
-      let* r = try_processor proc url queue_message ~timeout_s in
-      (match r with Some _ -> Lwt.return r | None -> try_list tl)
-  in
-  try_list candidates
+  match ordered with
+  | [] -> Lwt.return_none
+  | [ (proc, url) ] ->
+      try_processor proc url queue_message ~timeout_s
+  | (p1_proc, p1_url) :: (p2_proc, p2_url) :: _ ->
+      (* Hedged: start primary, start secondary after a small delay if primary hasn't finished. *)
+      let hedge_delay = 0.2 (* seconds *) in
+      let p1 = try_processor p1_proc p1_url queue_message ~timeout_s in
+      let s2 = Lwt_unix.sleep hedge_delay in
+      let p2 =
+        let* () = s2 in
+        try_processor p2_proc p2_url queue_message ~timeout_s
+      in
+      (* Resolve with the first Some; if both None, return None after both complete. *)
+      let (resolver, wakener) = Lwt.wait () in
+      let resolved = ref false in
+      Lwt.on_success p1 (function
+        | Some _ as r when not !resolved ->
+            resolved := true; Lwt.wakeup_later wakener r
+        | _ -> ());
+      Lwt.on_success p2 (function
+        | Some _ as r when not !resolved ->
+            resolved := true; Lwt.wakeup_later wakener r
+        | _ -> ());
+      let* _ = Lwt.join [ (let* _ = p1 in Lwt.return_unit); (let* _ = p2 in Lwt.return_unit) ] in
+      if !resolved then resolver else Lwt.return_none

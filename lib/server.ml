@@ -48,77 +48,90 @@ let process_payments_worker () =
 (* Manual fast JSON parse left intact, but could be improved later *)
 let fast_parse_payment body_str =
   let len = String.length body_str in
-  if len < 30 then None else (* Minimum size check *)
+  if len < 30 then None else
+  let is_ws = function ' ' | '\t' | '\n' | '\r' -> true | _ -> false in
+  let i = ref 0 in
+  let amount : float option ref = ref None in
+  let corr : string option ref = ref None in
 
-  let is_whitespace = function ' ' | '\t' | '\n' | '\r' -> true | _ -> false in
-
-  (* Find "amount" field *)
-  let rec find_amount i =
-    if i >= len - 8 then None else
-    if String.sub body_str i 8 = "\"amount\"" then
-      let rec find_colon j =
-        if j >= len then None else
-        if body_str.[j] = ':' then
-          let rec skip_whitespace k =
-            if k >= len then None else
-            if is_whitespace body_str.[k] then skip_whitespace (k + 1)
-            else Some k
-          in
-          skip_whitespace (j + 1)
-        else find_colon (j + 1)
-      in
-      find_colon (i + 8)
-    else find_amount (i + 1)
+  let skip_ws () =
+    while !i < len && is_ws body_str.[!i] do incr i done
   in
 
-  (* Find "correlation_id" field *)
-  let rec find_correlation_id i =
-    if i >= len - 16 then None else
-    if String.sub body_str i 16 = "\"correlation_id\"" then
-      let rec find_colon j =
-        if j >= len then None else
-        if body_str.[j] = ':' then
-          let rec skip_whitespace k =
-            if k >= len then None else
-            if is_whitespace body_str.[k] then skip_whitespace (k + 1)
-            else if body_str.[k] = '"' then Some (k + 1)
-            else None
-          in
-          skip_whitespace (j + 1)
-        else find_colon (j + 1)
+  let read_string () =
+    if !i >= len || body_str.[!i] <> '"' then None
+    else (
+      incr i; (* skip opening quote *)
+      let buf = Buffer.create 32 in
+      let rec loop () =
+        if !i >= len then None
+        else
+          let c = body_str.[!i] in
+          if c = '"' then (incr i; Some (Buffer.contents buf))
+          else if c = '\\' && !i + 1 < len then (
+            (* simple escape handling: include escaped char as-is *)
+            incr i;
+            Buffer.add_char buf body_str.[!i];
+            incr i;
+            loop ()
+          ) else (
+            Buffer.add_char buf c;
+            incr i;
+            loop ()
+          )
       in
-      find_colon (i + 16)
-    else find_correlation_id (i + 1)
+      loop ()
+    )
   in
 
-  let amount_opt =
-    match find_amount 0 with
-    | None -> None
-    | Some pos ->
-      let rec find_end j acc =
-        if j >= len then Float.of_string acc
-        else match body_str.[j] with
-        | '0'..'9' | '.' | '-' | '+' | 'e' | 'E' -> find_end (j + 1) (acc ^ String.make 1 body_str.[j])
-        | _ -> Float.of_string acc
-      in
-      try Some (find_end pos "") with _ -> None
+  let read_number () =
+    let start = !i in
+    if !i < len && (body_str.[!i] = '-' || body_str.[!i] = '+') then incr i;
+    let has_digits = ref false in
+    while !i < len && (body_str.[!i] >= '0' && body_str.[!i] <= '9') do incr i; has_digits := true done;
+    if !i < len && body_str.[!i] = '.' then (
+      incr i;
+      while !i < len && (body_str.[!i] >= '0' && body_str.[!i] <= '9') do incr i; has_digits := true done
+    );
+    if !i < len && (body_str.[!i] = 'e' || body_str.[!i] = 'E') then (
+      incr i;
+      if !i < len && (body_str.[!i] = '+' || body_str.[!i] = '-') then incr i;
+      while !i < len && (body_str.[!i] >= '0' && body_str.[!i] <= '9') do incr i; has_digits := true done
+    );
+    if not !has_digits then None
+    else
+      let slice_len = !i - start in
+      try Some (Float.of_string (String.sub body_str start slice_len)) with _ -> None
   in
 
-  let correlation_id_opt =
-    match find_correlation_id 0 with
-    | None -> None
-    | Some pos ->
-      let rec find_end j acc =
-        if j >= len then Some acc
-        else if body_str.[j] = '"' then Some acc
-        else find_end (j + 1) (acc ^ String.make 1 body_str.[j])
-      in
-      find_end pos ""
-  in
+  while !i < len && (!amount = None || !corr = None) do
+    skip_ws ();
+    if !i < len && body_str.[!i] = '"' then (
+      match read_string () with
+      | Some key ->
+        skip_ws ();
+        if !i < len && body_str.[!i] = ':' then incr i;
+        skip_ws ();
+        if key = "amount" then (
+          match read_number () with
+          | Some v -> amount := Some v
+          | None -> ()
+        ) else if key = "correlation_id" then (
+          match read_string () with
+          | Some v -> corr := Some v
+          | None -> ()
+        ) else (
+          (* skip unknown value token (string/number/object/array/null/true/false) roughly *)
+          (if !i < len && body_str.[!i] = '"' then ignore (read_string ())
+           else if !i < len && ((body_str.[!i] >= '0' && body_str.[!i] <= '9') || body_str.[!i] = '-' || body_str.[!i] = '+') then ignore (read_number ())
+           else incr i)
+        )
+      | None -> incr i
+    ) else incr i
+  done;
 
-  match amount_opt, correlation_id_opt with
-  | Some amount, Some correlation_id when amount > 0.0 && correlation_id <> "" ->
-    Some Types.{ amount; correlation_id }
+  match !amount, !corr with
+  | Some a, Some c when a > 0.0 && c <> "" -> Some Types.{ amount = a; correlation_id = c }
   | _ -> None
 
 (* Robust HTTP read: read headers until CRLFCRLF, then read body by Content-Length or chunked *)
@@ -276,6 +289,7 @@ let send_http_response fd status_code ?(content_type="application/json") body =
     | 404 -> "Not Found"
     | 500 -> "Internal Server Error"
     | 400 -> "Bad Request"
+    | 413 -> "Payload Too Large"
     | _ -> "Unknown"
   in
   let body_str = match body with Some s -> s | None -> "" in
@@ -344,23 +358,8 @@ let handle_http_request fd request_line _headers body_opt =
           let* () = Queue.enqueue task_queue queue_message in
           send_http_response fd 200 (Some "")
         | None ->
-          send_http_response fd 500 (Some "{\"error\":\"Invalid request data\"}"))
-     | None ->
-       let (cl, te) = header_debug _headers in
-       let hdr_sample =
-         let hlen = String.length _headers in
-         let take = if hlen > 200 then 200 else hlen in
-         String.sub _headers 0 take |> String.escaped
-       in
-       let msg =
-         Printf.sprintf
-           "{\"error\":\"No body provided!!!!\",\"contentLengthHeader\":%s,\"transferEncoding\":%s,\"requestLine\":\"%s\",\"headersSample\":\"%s\"}"
-           (match cl with Some v -> Printf.sprintf "\"%s\"" v | None -> "null")
-           (match te with Some v -> Printf.sprintf "\"%s\"" v | None -> "null")
-           (String.escaped request_line)
-           hdr_sample
-       in
-       send_http_response fd 500 (Some msg))
+          send_http_response fd 400 (Some "{\"error\":\"Invalid request data\"}"))
+     | None -> send_http_response fd 400 (Some "{\"error\":\"No body provided\"}"))
   | "/payments-summary" ->
     let params = parse_query_params path in
     let from_time = get_param params "from" in
@@ -382,8 +381,12 @@ let handle_client fd =
   let request_line = match lines with | h :: _ -> String.trim h | [] -> "" in
   let* () =
     try
-      let body_opt = if String.length body > 0 then Some body else None in
-      handle_http_request fd request_line headers body_opt
+      let max_body = 4096 in
+      if String.length body > max_body then
+        send_http_response fd 413 (Some "{\"error\":\"Payload too large\"}")
+      else
+        let body_opt = if String.length body > 0 then Some body else None in
+        handle_http_request fd request_line headers body_opt
     with _ ->
       send_http_response fd 500 (Some "{\"error\":\"Internal server error\"}")
   in
