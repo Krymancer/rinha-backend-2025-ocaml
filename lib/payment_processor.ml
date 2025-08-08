@@ -4,45 +4,63 @@ open Types
 let payment_processor_default_url = "http://payment-processor-default:8080"
 let payment_processor_fallback_url = "http://payment-processor-fallback:8080"
 
-(* Simplified health status - only check when payments fail *)
-type health_status = {
-  is_healthy : bool;
-  last_check : float;
+(* Background health monitoring with cached snapshot *)
+type health_snapshot = {
+  healthy : bool;
+  min_response_time : int; (* ms *)
+  last_updated : float;
 }
 
-let default_health = ref { is_healthy = true; last_check = 0.0 }
-let fallback_health = ref { is_healthy = true; last_check = 0.0 }
+let default_health = ref { healthy = true; min_response_time = 0; last_updated = 0.0 }
+let fallback_health = ref { healthy = true; min_response_time = 0; last_updated = 0.0 }
 
-let check_health_if_needed url health_ref =
-  let now = Unix.time () in
-  if now -. !health_ref.last_check >= 10.0 then (
-    let uri = Uri.of_string (url ^ "/payments/service-health") in
-    try
-      let* (resp, body) = Cohttp_lwt_unix.Client.get uri in
-      let status_code = Cohttp.Response.status resp |> Cohttp.Code.code_of_status in
-      let* _body_string = Cohttp_lwt.Body.to_string body in
-      let is_healthy = (status_code = 200) in
-      health_ref := { is_healthy; last_check = now };
-      Lwt.return is_healthy
-    with _ ->
-      health_ref := { is_healthy = false; last_check = now };
-      Lwt.return false
-  ) else
-    Lwt.return !health_ref.is_healthy
+let fetch_health url =
+  let uri = Uri.of_string (url ^ "/payments/service-health") in
+  try
+    let* (resp, body) = Cohttp_lwt_unix.Client.get uri in
+    let code = Cohttp.Response.status resp |> Cohttp.Code.code_of_status in
+    let* body_str = Cohttp_lwt.Body.to_string body in
+    if code = 200 then (
+      try
+        let json = Yojson.Safe.from_string body_str in
+        let open Yojson.Safe.Util in
+        let failing = json |> member "failing" |> to_bool in
+        let min_rt = json |> member "minResponseTime" |> to_int in
+        Lwt.return { healthy = (not failing); min_response_time = min_rt; last_updated = Unix.time () }
+      with _ -> Lwt.return { healthy = false; min_response_time = max_int; last_updated = Unix.time () }
+    ) else (
+      Lwt.return { healthy = false; min_response_time = max_int; last_updated = Unix.time () }
+    )
+  with _ -> Lwt.return { healthy = false; min_response_time = max_int; last_updated = Unix.time () }
 
-let mark_unhealthy health_ref =
-  health_ref := { !health_ref with is_healthy = false }
+let rec health_loop url health_ref =
+  let* snap = fetch_health url in
+  health_ref := snap;
+  (* Respect 1 call per 5s limit *)
+  let* () = Lwt_unix.sleep 5.0 in
+  health_loop url health_ref
+
+let monitors_started = ref false
+
+let ensure_health_monitors_started () =
+  if not !monitors_started then (
+    monitors_started := true;
+    Lwt.async (fun () -> health_loop payment_processor_default_url default_health);
+    Lwt.async (fun () -> health_loop payment_processor_fallback_url fallback_health)
+  )
 
 let get_iso_time () =
   let now = Unix.time () in
-  let seconds = floor now in
-  let milliseconds = int_of_float ((now -. seconds) *. 1000.0) in
-  let tm = Unix.gmtime seconds in
-  Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ"
+  (* Convert to milliseconds and round to match JavaScript behavior *)
+  let millis = Int64.of_float (now *. 1000.0) in
+  let seconds = Int64.div millis 1000L in
+  let ms_part = Int64.rem millis 1000L in
+  let tm = Unix.gmtime (Int64.to_float seconds) in
+  Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02d.%03LdZ"
     (tm.tm_year + 1900) (tm.tm_mon + 1) tm.tm_mday
-    tm.tm_hour tm.tm_min tm.tm_sec milliseconds
+    tm.tm_hour tm.tm_min tm.tm_sec ms_part
 
-let make_payment_request url amount correlation_id =
+let make_payment_request url amount correlation_id ~timeout_s =
   let uri = Uri.of_string (url ^ "/payments") in
   let iso_time = get_iso_time () in
   let body = Printf.sprintf 
@@ -50,74 +68,63 @@ let make_payment_request url amount correlation_id =
     iso_time amount correlation_id in
   let headers = Cohttp.Header.init_with "content-type" "application/json" in
   
-  (* Add timeout to prevent hanging requests *)
-  let timeout_duration = 2.0 in (* 2 second timeout *)
   let request_promise = 
     try
       let* (resp, resp_body) = Cohttp_lwt_unix.Client.post ~headers ~body:(`String body) uri in
       let status_code = Cohttp.Response.status resp |> Cohttp.Code.code_of_status in
-      let* _body_string = Cohttp_lwt.Body.to_string resp_body in
-      Lwt.return (status_code = 200)
-    with 
-    | _exn -> Lwt.return false
+      let* _response_body = Cohttp_lwt.Body.to_string resp_body in
+      if status_code = 200 then Lwt.return (true, iso_time) else Lwt.return (false, iso_time)
+    with _ -> Lwt.return (false, iso_time)
   in
-  let timeout_promise = 
-    let* () = Lwt_unix.sleep timeout_duration in
-    Lwt.return false
+  let timeout_promise =
+    let* () = Lwt_unix.sleep timeout_s in
+    Lwt.return (false, iso_time)
   in
   Lwt.pick [request_promise; timeout_promise]
 
-let process_with_default (queue_message : Types.queue_message) : Types.payment_data_response option Lwt.t =
-  let iso_time = get_iso_time () in
-  let* success = make_payment_request payment_processor_default_url queue_message.amount queue_message.correlation_id in
-  if success then (
-    let response = {
-      requested_at = iso_time;
-      amount = queue_message.amount;
-      correlation_id = queue_message.correlation_id;
-      payment_processor = Default;
-    } in
-    Lwt.return_some response
-  ) else (
-    mark_unhealthy default_health;
-    Lwt.return_none
-  )
+let mk_response (processor:Types.payment_processor) (iso_time:string) (queue_message:Types.queue_message) : Types.payment_data_response =
+  {
+    requested_at = iso_time;
+    amount = queue_message.amount;
+    correlation_id = queue_message.correlation_id;
+    payment_processor = processor;
+  }
 
-let process_with_fallback (queue_message : Types.queue_message) : Types.payment_data_response option Lwt.t =
-  let iso_time = get_iso_time () in
-  let* success = make_payment_request payment_processor_fallback_url queue_message.amount queue_message.correlation_id in
-  if success then (
-    let response = {
-      requested_at = iso_time;
-      amount = queue_message.amount;
-      correlation_id = queue_message.correlation_id;
-      payment_processor = Fallback;
-    } in
-    Lwt.return_some response
-  ) else (
-    mark_unhealthy fallback_health;
-    Lwt.return_none
-  )
+let try_processor (processor:Types.payment_processor) (url:string) (queue_message:Types.queue_message) ~(timeout_s:float) : Types.payment_data_response option Lwt.t =
+  let* (ok, iso_time) = make_payment_request url queue_message.amount queue_message.correlation_id ~timeout_s in
+  if ok then Lwt.return_some (mk_response processor iso_time queue_message) else Lwt.return_none
 
 let process_payment (queue_message : Types.queue_message) : Types.payment_data_response option Lwt.t =
-  (* Check health status only occasionally, not on every payment *)
-  let* default_healthy = check_health_if_needed payment_processor_default_url default_health in
-  let* fallback_healthy = check_health_if_needed payment_processor_fallback_url fallback_health in
-  
-  (* Choose which processor to try first based on health status *)
-  let (first_processor, second_processor) = 
-    if not default_healthy && fallback_healthy then
-      (* Default is unhealthy, fallback is healthy - try fallback first *)
-      (process_with_fallback, process_with_default)
+  (* Ensure background health monitors are running *)
+  ensure_health_monitors_started ();
+
+  (* Snapshot health *)
+  let d = !default_health in
+  let f = !fallback_health in
+
+  (* Build candidates ordered by health and minResponseTime; default wins ties *)
+  let candidates =
+    if d.healthy && f.healthy then
+      if d.min_response_time <= f.min_response_time then
+        [ (Default, payment_processor_default_url);
+          (Fallback, payment_processor_fallback_url) ]
+      else
+        [ (Fallback, payment_processor_fallback_url);
+          (Default, payment_processor_default_url) ]
+    else if d.healthy then
+      [ (Default, payment_processor_default_url) ]
+    else if f.healthy then
+      [ (Fallback, payment_processor_fallback_url) ]
     else
-      (* Default case: try default first, then fallback *)
-      (process_with_default, process_with_fallback)
+      [ (Default, payment_processor_default_url);
+        (Fallback, payment_processor_fallback_url) ]
   in
-  
-  (* Try first processor *)
-  let* first_result = first_processor queue_message in
-  match first_result with
-  | Some result -> Lwt.return_some result
-  | None ->
-    (* First failed, try second processor *)
-    second_processor queue_message
+
+  let timeout_s = 3.0 in
+  let rec try_list = function
+    | [] -> Lwt.return_none
+    | (proc, url) :: tl ->
+      let* r = try_processor proc url queue_message ~timeout_s in
+      (match r with Some _ -> Lwt.return r | None -> try_list tl)
+  in
+  try_list candidates

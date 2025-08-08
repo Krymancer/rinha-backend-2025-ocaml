@@ -11,6 +11,7 @@ type payment_summary_response = {
 }
 
 let process_state data from_timestamp to_timestamp =
+  (* Fallback list-based logic, kept for compatibility in any remaining callers *)
   let summary = ref { total_requests = 0; total_amount = 0.0 } in
   List.iter (fun (entry : Storage.storage_entry) ->
     let is_out_of_range = 
@@ -29,6 +30,26 @@ let process_state data from_timestamp to_timestamp =
     )
   ) data;
   !summary
+
+let process_state_fold (storage: Storage.BitPackingStorage.t) from_ts to_ts =
+  let total_requests = ref 0 in
+  let total_amount = ref 0.0 in
+  let within ts =
+    let ge_from = match from_ts with None -> true | Some a -> Int64.compare ts a >= 0 in
+    let le_to = match to_ts with None -> true | Some b -> Int64.compare ts b <= 0 in
+    ge_from && le_to
+  in
+  for i = 0 to storage.length - 1 do
+    let idx = i * 2 in
+    let delta = storage.data.(idx) in
+    let amount_cents = storage.data.(idx + 1) in
+    let ts = Int64.add storage.start_timestamp (Int64.of_int delta) in
+    if within ts then (
+      incr total_requests;
+      total_amount := !total_amount +. Money.cents_to_float amount_cents
+    )
+  done;
+  { total_requests = !total_requests; total_amount = !total_amount }
 
 let get_foreign_state foreign_state_host from_time to_time =
   try
@@ -77,8 +98,7 @@ let get_foreign_state foreign_state_host from_time to_time =
         fallback = { total_requests = 0; total_amount = 0.0 };
       }
     )
-  with e -> 
-    Printf.printf "Error in get_foreign_state: %s\n%!" (Printexc.to_string e);
+  with _ -> 
     Lwt.return {
       default = { total_requests = 0; total_amount = 0.0 };
       fallback = { total_requests = 0; total_amount = 0.0 };
@@ -98,11 +118,8 @@ let payment_summary_service state foreign_state_host from_time to_time local_onl
   let from_timestamp = parse_timestamp from_time in
   let to_timestamp = parse_timestamp to_time in
   
-  let default_data = Storage.BitPackingStorage.list state.Storage.default in
-  let fallback_data = Storage.BitPackingStorage.list state.Storage.fallback in
-  
-  let default_summary = process_state default_data from_timestamp to_timestamp in
-  let fallback_summary = process_state fallback_data from_timestamp to_timestamp in
+  let default_summary = process_state_fold state.Storage.default from_timestamp to_timestamp in
+  let fallback_summary = process_state_fold state.Storage.fallback from_timestamp to_timestamp in
   
   if local_only then
     Lwt.return { default = default_summary; fallback = fallback_summary }

@@ -28,3 +28,11 @@ GET http://localhost:9999/api2/payments-summary?localOnly=true
 
 ### Purge
 POST http://localhost:9999/purge-payments
+
+### default admin
+GET http://localhost:8001/admin/payments-summary
+X-Rinha-Token: 123
+
+### fallback admin
+GET http://localhost:8002/admin/payments-summary
+X-Rinha-Token: 123

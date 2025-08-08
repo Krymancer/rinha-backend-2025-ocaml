@@ -9,8 +9,8 @@ module BitPackingStorage = struct
   type t = {
     mutable start_timestamp : int64;
     mutable data : int array;
-    mutable length : int;
-    mutable capacity : int;
+    mutable length : int; (* number of entries *)
+    mutable capacity : int; (* size of [data] array in ints *)
   }
 
   let create () =
@@ -28,7 +28,8 @@ module BitPackingStorage = struct
   let resize storage =
     let new_capacity = storage.capacity * 2 in
     let new_data = Array.make new_capacity 0 in
-    Array.blit storage.data 0 new_data 0 storage.length;
+    (* copy existing pairs: 2 ints per entry *)
+    Array.blit storage.data 0 new_data 0 (storage.length * 2);
     storage.data <- new_data;
     storage.capacity <- new_capacity
 
@@ -42,15 +43,10 @@ module BitPackingStorage = struct
     if amount < 0 then
       failwith "Amount deve ser positivo";
     
-    if storage.length >= storage.capacity then
-      resize storage;
-    
-    (* Use simple storage - no bit packing to avoid amount truncation *)
-    (* Store as: data[i*2] = delta, data[i*2+1] = amount *)
+    (* Ensure capacity for two ints per entry *)
     let idx = storage.length * 2 in
     if idx + 1 >= storage.capacity then (
-      resize storage;
-      resize storage  (* Make sure we have enough space for 2 elements *)
+      resize storage
     );
     
     storage.data.(idx) <- delta_int;
@@ -67,6 +63,24 @@ module BitPackingStorage = struct
       result := { amount; requested_at } :: !result
     done;
     !result
+
+  (* Iterate over entries within [from_ts, to_ts] bounds without allocating *)
+  let fold_in_range storage ~(from_ts:int64 option) ~(to_ts:int64 option) ~init ~f =
+    let acc = ref init in
+    let within ts =
+      let ge_from = match from_ts with None -> true | Some a -> Int64.compare ts a >= 0 in
+      let le_to = match to_ts with None -> true | Some b -> Int64.compare ts b <= 0 in
+      ge_from && le_to
+    in
+    for i = 0 to storage.length - 1 do
+      let idx = i * 2 in
+      let delta = storage.data.(idx) in
+      let amount = storage.data.(idx + 1) in
+      let ts = Int64.add storage.start_timestamp (Int64.of_int delta) in
+      if within ts then
+        acc := f !acc amount ts
+    done;
+    !acc
 end
 
 type state = {
