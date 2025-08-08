@@ -6,7 +6,7 @@ services:
     environment:
       - SOCKET_PATH=/tmp/api1.sock
       - FOREIGN_STATE=api2
-      - WORKERS=4
+      - WORKERS=16
     volumes:
       - rb2025:/tmp/
     networks:
@@ -25,7 +25,7 @@ services:
     environment:
       - SOCKET_PATH=/tmp/api2.sock
       - FOREIGN_STATE=api1
-      - WORKERS=4
+      - WORKERS=16
     volumes:
       - rb2025:/tmp/
     networks:

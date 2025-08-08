@@ -127,34 +127,21 @@ let process_payment (queue_message : Types.queue_message) : Types.payment_data_r
         (Fallback, payment_processor_fallback_url) ]
   in
 
-  let timeout_s = 1.5 in
+  let timeout_s = 1.8 in
   match ordered with
   | [] -> Lwt.return_none
   | [ (proc, url) ] ->
+      (* Single healthy candidate: try it once *)
       try_processor proc url queue_message ~timeout_s
   | (p1_proc, p1_url) :: (p2_proc, p2_url) :: _ ->
-      let hedge_delay = 0.2 in
-      let resolved = ref false in
-      let result_t, result_w = Lwt.wait () in
-
-      let p1 = try_processor p1_proc p1_url queue_message ~timeout_s in
-      Lwt.on_success p1 (function
-        | Some _ as r when not !resolved ->
-            resolved := true; Lwt.wakeup_later result_w r
-        | _ -> ());
-
-      let p2 =
-        let* () = Lwt_unix.sleep hedge_delay in
-        if !resolved then Lwt.return_none
-        else try_processor p2_proc p2_url queue_message ~timeout_s
+      (* Gate fallback on health: if primary is healthy, do NOT fallback on timeout. *)
+      let primary_healthy = match p1_proc with
+        | Default -> d.healthy
+        | Fallback -> f.healthy
       in
-      Lwt.on_success p2 (function
-        | Some _ as r when not !resolved ->
-            resolved := true; Lwt.wakeup_later result_w r
-        | _ -> ());
-
-      let none_when_both_finish =
-        let* _ = Lwt.both p1 p2 in
-        Lwt.return_none
-      in
-      Lwt.pick [ result_t; none_when_both_finish ]
+      if primary_healthy then
+        (* Try primary only *)
+        try_processor p1_proc p1_url queue_message ~timeout_s
+      else
+        (* Primary unhealthy: try secondary only *)
+        try_processor p2_proc p2_url queue_message ~timeout_s

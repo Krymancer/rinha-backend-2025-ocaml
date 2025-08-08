@@ -406,7 +406,7 @@ let start_server socket_path =
   let addr = Unix.ADDR_UNIX socket_path in
 
   let* () = Lwt_unix.bind sock addr in
-  Lwt_unix.listen sock 64; (* backlog *)
+  Lwt_unix.listen sock 256; (* increased backlog to handle bursts *)
   Unix.chmod socket_path 0o666;
 
   let rec accept_loop () =
